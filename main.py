@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
 Инструмент визуализации графа зависимостей пакетов
-Этап 2: Сбор данных
+Этап 3: Основные операции
 """
 
 import argparse
 import sys
 import os
 import random
+from collections import defaultdict
 
 
-# === Этап 1: функции валидации ===
+# === Валидация параметров ===
 
 def validate_package_name(name):
     if not name or not name.strip():
@@ -20,15 +21,21 @@ def validate_package_name(name):
     return name.strip()
 
 
-def validate_url(url):
+def validate_url(url, test_mode=False):
+    """Валидация URL или пути к файлу"""
     if not url or not url.strip():
         raise ValueError("URL или путь к файлу не может быть пустым")
 
     url = url.strip()
+
+    # Проверка на URL
     if url.startswith(('http://', 'https://')):
         return url
-    if os.path.exists(url):
+
+    # Проверка пути к файлу (в тестовом режиме файл может отсутствовать)
+    if os.path.exists(url) or test_mode:
         return url
+
     raise ValueError(f"Файл не существует: {url}")
 
 
@@ -57,56 +64,121 @@ def validate_version(version):
     return version
 
 
-# === Этап 2: Сбор данных ===
+# === Логика этапа 3 ===
 
 def simulate_dependency_data(package_name):
-    """
-    Имитация получения зависимостей для пакета (без обращения к сети).
-    Генерирует фиктивные зависимости для демонстрации логики.
-    """
-    print(f"\n=== Получение зависимостей для пакета '{package_name}' ===")
-
-    # Список возможных "библиотек"
-    sample_libs = [
-        "libc6", "libffi", "libssl", "zlib", "requests",
-        "numpy-base", "setuptools", "wheel", "certifi", "pandas"
-    ]
-
-    # Фиксированные зависимости для популярных пакетов
+    """Имитация получения зависимостей для пакета"""
     known_packages = {
-        "numpy": ["libc6", "libffi"],
-        "pandas": ["numpy", "python-dateutil", "pytz"],
-        "requests": ["urllib3", "certifi", "chardet"],
-        "matplotlib": ["numpy", "pillow", "cycler"],
+        "C": ["A", "B"],
+        "E": ["C", "D", "E"],
+        "F": ["G", "J", "K"],
+        "L": ["C", "M", "N"],
     }
 
+    sample_libs = [
+        "A", "B", "O", "P", "F",
+        "Q", "R", "S", "T", "E"
+    ]
+
     if package_name in known_packages:
-        deps = known_packages[package_name]
+        return known_packages[package_name]
     else:
-        deps = random.sample(sample_libs, k=random.randint(1, 4))
+        return random.sample(sample_libs, k=random.randint(1, 3))
 
-    print(" Найдены прямые зависимости:")
-    for dep in deps:
-        print(f"  - {dep}")
 
-    return deps
+def load_test_graph(file_path):
+    """Загрузка тестового графа зависимостей из файла (режим тестирования)"""
+    graph = defaultdict(list)
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or ':' not in line:
+                    continue
+                pkg, deps = line.split(':')
+                pkg = pkg.strip()
+                dep_list = [d.strip() for d in deps.split(',') if d.strip()]
+                graph[pkg] = dep_list
+        return graph
+    except Exception as e:
+        print(f"Ошибка при чтении тестового файла: {e}")
+        sys.exit(1)
+
+
+def build_dependency_graph(package, test_mode=False, url=None):
+    """Построение графа зависимостей с помощью BFS и рекурсии"""
+    visited = set()
+    graph = defaultdict(list)
+
+    if test_mode and url and os.path.exists(url):
+        test_graph = load_test_graph(url)
+    else:
+        test_graph = {}
+
+    def bfs(pkg):
+        if pkg in visited:
+            return
+        visited.add(pkg)
+        if test_mode and test_graph:
+            deps = test_graph.get(pkg, [])
+        else:
+            deps = simulate_dependency_data(pkg)
+        graph[pkg] = deps
+        for dep in deps:
+            if dep not in visited:
+                bfs(dep)
+
+    bfs(package)
+    return graph
+
+
+def detect_cycles(graph):
+    """Проверка наличия циклов"""
+    visited = set()
+    stack = set()
+
+    def dfs(node):
+        if node in stack:
+            return True
+        if node in visited:
+            return False
+        visited.add(node)
+        stack.add(node)
+        for neighbor in graph.get(node, []):
+            if dfs(neighbor):
+                return True
+        stack.remove(node)
+        return False
+
+    for node in graph:
+        if dfs(node):
+            return True
+    return False
+
+
+def print_graph(graph):
+    """Вывод графа зависимостей"""
+    print("\n=== Граф зависимостей ===")
+    for pkg, deps in graph.items():
+        deps_str = ", ".join(deps) if deps else "(нет зависимостей)"
+        print(f"{pkg} -> {deps_str}")
 
 
 # === Основная функция ===
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Инструмент визуализации графа зависимостей пакетов (Этап 2)',
+        description='Инструмент визуализации графа зависимостей пакетов (Этап 3)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры использования:
 python main.py --package numpy --url https://pypi.org --version 1.24.0 --output graph.png
-python main.py --package requests --url https://pypi.org --output test.png
+python main.py --package A --url ./test_graph.txt --test-mode --output graph.svg
         """
     )
 
     parser.add_argument('--package', type=validate_package_name, required=True, help='Имя анализируемого пакета')
-    parser.add_argument('--url', type=validate_url, required=True, help='URL репозитория или путь к файлу')
+    parser.add_argument('--url', required=True, help='URL репозитория или путь к файлу')
     parser.add_argument('--test-mode', action='store_true', help='Режим тестового репозитория')
     parser.add_argument('--version', type=validate_version, default='latest', help='Версия пакета')
     parser.add_argument('--output', type=validate_filename, default='dependency_graph.png', help='Имя выходного файла')
@@ -114,7 +186,9 @@ python main.py --package requests --url https://pypi.org --output test.png
     try:
         args = parser.parse_args()
 
-        # Вывод конфигурации
+        # Проверка URL с учётом test_mode
+        args.url = validate_url(args.url, test_mode=args.test_mode)
+
         print("=== Параметры конфигурации ===")
         print(f"Анализируемый пакет: {args.package}")
         print(f"URL/путь к репозиторию: {args.url}")
@@ -123,12 +197,15 @@ python main.py --package requests --url https://pypi.org --output test.png
         print(f"Выходной файл: {args.output}")
         print("==============================")
 
-        # Этап 2 — Сбор данных
-        deps = simulate_dependency_data(args.package)
+        graph = build_dependency_graph(args.package, test_mode=args.test_mode, url=args.url)
 
-        print("\n=== Результаты этапа 2 ===")
-        print(f"Количество прямых зависимостей: {len(deps)}")
-        print("Сбор данных завершён успешно. Можно переходить к этапу 3.")
+        if detect_cycles(graph):
+            print("\n Обнаружены циклические зависимости!")
+        else:
+            print("\n Циклических зависимостей не найдено.")
+
+        print_graph(graph)
+        print("\nГраф зависимостей успешно построен.")
 
     except Exception as e:
         print(f" Ошибка: {e}", file=sys.stderr)
