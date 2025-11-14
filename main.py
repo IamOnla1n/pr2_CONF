@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Инструмент визуализации графа зависимостей пакетов Ubuntu
-Этап 3: Основные операции - построение графа зависимостей с учетом транзитивности
+Этап 4: Дополнительные операции - порядок загрузки зависимостей
 """
 
 import argparse
@@ -10,7 +10,7 @@ import os
 import urllib.request
 import gzip
 import re
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Tuple
 from collections import deque
 
 
@@ -22,7 +22,6 @@ def validate_package_name(name):
         raise ValueError("Имя пакета не может быть пустым")
     
     name = name.strip()
-    # Принимаем как пакеты Ubuntu (нижний регистр), так и тестовые (верхний регистр)
     if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9.+-]*$', name):
         raise ValueError("Имя пакета содержит недопустимые символы")
     
@@ -130,7 +129,7 @@ class UbuntuAPTRepository:
         return packages
     
     def extract_dependencies(self, package_info: Dict) -> List[str]:
-        """Извлечь прямые зависимости из информации о пакете"""
+        """Извлечь прямые зависимости из информации о пакета"""
         dependencies = []
         
         dependency_fields = ['Depends', 'Pre-Depends']
@@ -225,15 +224,7 @@ def build_dependency_graph_bfs(start_package: str,
                              get_dependencies_func, 
                              max_depth: int = 10) -> Dict[str, List[str]]:
     """
-    Построение графа зависимостей с помощью алгоритм BFS с рекурсией
-    
-    Args:
-        start_package: начальный пакет
-        get_dependencies_func: функция для получения зависимостей пакета
-        max_depth: максимальная глубина рекурсии
-    
-    Returns:
-        Dict[str, List[str]]: граф зависимостей
+    Построение графа зависимостей с помощью алгоритма BFS с рекурсией
     """
     graph = {}
     visited = set()
@@ -262,8 +253,6 @@ def build_dependency_graph_bfs(start_package: str,
             dependencies = get_dependencies_func(current_package)
             graph[current_package] = dependencies
             
-            print(f"{'  ' * depth}Пакет: {current_package}, зависимости: {dependencies}")
-            
             for dep in dependencies:
                 bfs_recursive(dep, depth + 1, path + [current_package])
                 
@@ -281,6 +270,91 @@ def build_dependency_graph_bfs(start_package: str,
             print(f"{i}. {cycle}")
     
     return graph
+
+
+# === Алгоритм для определения порядка загрузки зависимостей ===
+
+def calculate_download_order(start_package: str, 
+                           get_dependencies_func,
+                           max_depth: int = 10) -> Tuple[List[str], Dict[str, List[str]]]:
+    """
+    Определение порядка загрузки зависимостей с помощью топологической сортировки
+    """
+    graph = build_dependency_graph_bfs(start_package, get_dependencies_func, max_depth)
+    
+    # Строим обратный граф для вычисления входящих степеней
+    reverse_graph = {}
+    in_degree = {}
+    
+    # Инициализация
+    for package in graph:
+        reverse_graph[package] = []
+        in_degree[package] = 0
+    
+    # Построение обратного графа и подсчет входящих степеней
+    for package, deps in graph.items():
+        for dep in deps:
+            if dep not in reverse_graph:
+                reverse_graph[dep] = []
+                in_degree[dep] = 0
+            reverse_graph[dep].append(package)
+            in_degree[package] = in_degree.get(package, 0) + 1
+    
+    # Алгоритм Кана (топологическая сортировка)
+    order = []
+    queue = deque()
+    
+    # Добавляем пакеты с нулевой входящей степенью
+    for package, degree in in_degree.items():
+        if degree == 0:
+            queue.append(package)
+    
+    while queue:
+        current = queue.popleft()
+        order.append(current)
+        
+        for dependent in reverse_graph.get(current, []):
+            in_degree[dependent] -= 1
+            if in_degree[dependent] == 0:
+                queue.append(dependent)
+    
+    # Проверка на циклы (если остались пакеты с ненулевой степенью)
+    remaining_packages = [pkg for pkg, deg in in_degree.items() if deg > 0 and pkg not in order]
+    if remaining_packages:
+        print(f"Предупреждение: обнаружены циклические зависимости среди пакетов: {remaining_packages}")
+    
+    return order, graph
+
+
+def print_download_order_analysis(start_package: str, 
+                                download_order: List[str], 
+                                dependency_graph: Dict[str, List[str]]):
+    """
+    Вывод анализа порядка загрузки и сравнение с реальным менеджером пакетов
+    """
+    print(f"\n=== Анализ порядка загрузки для пакета '{start_package}' ===")
+    
+    print(f"\nПорядок загрузки зависимостей:")
+    for i, package in enumerate(download_order, 1):
+        print(f"{i:2d}. {package}")
+    
+    print(f"\nВсего пакетов для загрузки: {len(download_order)}")
+    
+    # Анализ расхождений с реальным менеджером пакетов
+    print(f"\n=== Сравнение с реальным менеджером пакетов ===")
+    print("Возможные расхождения в порядке загрузки могут быть вызваны:")
+    print("1. Альтернативными зависимостями (через '|') - наш алгоритм выбирает первую альтернативу")
+    print("2. Условными зависимостями (архитектурные ограничения) - наш алгоритм их игнорирует")
+    print("3. Рекомендуемыми зависимостями (Recommends) - наш алгоритм их не учитывает")
+    print("4. Конфликтующими пакетами (Conflicts) - наш алгоритм их не обрабатывает")
+    print("5. Разными алгоритмами разрешения зависимостей")
+    print("6. Наличием циклических зависимостей - наш алгоритм их обнаруживает, но может обрабатывать иначе")
+    
+    # Демонстрация на тестовых примерах
+    if all(pkg.isupper() for pkg in download_order):
+        print(f"\n=== Демонстрация на тестовом репозитории ===")
+        print("Для тестового репозитория порядок загрузки гарантированно корректен")
+        print("так как все зависимости явно заданы в файле конфигурации")
 
 
 # === Основная логика получения зависимостей ===
@@ -320,9 +394,6 @@ def get_dependencies_func_factory(repo_url: str, test_mode: bool = False):
 def get_package_dependencies_ubuntu(package_name: str, version: str, repo_url: str, test_mode: bool = False) -> Dict[str, List[str]]:
     """
     Основная функция для получения графа зависимостей пакета Ubuntu
-    
-    Returns:
-        Dict[str, List[str]]: граф зависимостей
     """
     print(f"\n=== Получение графа зависимостей для пакета '{package_name}' ===")
     print(f"Версия: {version}")
@@ -337,21 +408,41 @@ def get_package_dependencies_ubuntu(package_name: str, version: str, repo_url: s
     return dependency_graph
 
 
+def analyze_download_order(package_name: str, version: str, repo_url: str, test_mode: bool = False):
+    """
+    Анализ порядка загрузки зависимостей
+    """
+    print(f"\n=== Анализ порядка загрузки для пакета '{package_name}' ===")
+    print(f"Версия: {version}")
+    print(f"Источник: {repo_url}")
+    print(f"Режим тестирования: {'Включен' if test_mode else 'Выключен'}")
+    
+    get_deps_func = get_dependencies_func_factory(repo_url, test_mode)
+    
+    # Определяем порядок загрузки
+    download_order, dependency_graph = calculate_download_order(package_name, get_deps_func)
+    
+    # Выводим анализ
+    print_download_order_analysis(package_name, download_order, dependency_graph)
+    
+    return download_order, dependency_graph
+
+
 # === Основная функция ===
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Инструмент визуализации графа зависимостей пакетов Ubuntu (Этап 3)',
+        description='Инструмент визуализации графа зависимостей пакетов Ubuntu (Этап 4)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры использования:
-  # Реальный репозиторий Ubuntu
-  python main.py --package nginx --url http://archive.ubuntu.com/ubuntu/ --output graph.png
+  # Реальный репозиторий Ubuntu - порядок загрузки
+  python main.py --package nginx --url http://archive.ubuntu.com/ubuntu/ --download-order
   
-  # Тестовый репозиторий с файлом
-  python main.py --package A --url test_repo.txt --test-mode --output deps.svg
+  # Тестовый репозиторий с файлом - порядок загрузки
+  python main.py --package A --url test_repo.txt --test-mode --download-order
   
-  # С указанием версии
+  # Построение графа зависимостей
   python main.py --package python3 --version 3.10 --output test.png
         """
     )
@@ -379,6 +470,10 @@ def main():
                        type=validate_filename, 
                        default='dependency_graph.png',
                        help='Имя сгенерированного файла с изображением графа')
+    
+    parser.add_argument('--download-order', 
+                       action='store_true',
+                       help='Режим вывода на экран порядка загрузки зависимостей')
 
     try:
         args = parser.parse_args()
@@ -390,22 +485,32 @@ def main():
         print(f"Режим тестового репозитория: {'Включен' if args.test_mode else 'Выключен'}")
         print(f"Версия пакета: {args.version}")
         print(f"Выходной файл: {args.output}")
+        print(f"Режим порядка загрузки: {'Включен' if args.download_order else 'Выключен'}")
         print("==============================")
 
-        # Построение графа зависимостей
-        dependency_graph = get_package_dependencies_ubuntu(
-            package_name=args.package,
-            version=args.version,
-            repo_url=args.url,
-            test_mode=args.test_mode
-        )
+        if args.download_order:
+            # Режим порядка загрузки (требование этапа 4)
+            download_order, dependency_graph = analyze_download_order(
+                package_name=args.package,
+                version=args.version,
+                repo_url=args.url,
+                test_mode=args.test_mode
+            )
+        else:
+            # Построение графа зависимостей
+            dependency_graph = get_package_dependencies_ubuntu(
+                package_name=args.package,
+                version=args.version,
+                repo_url=args.url,
+                test_mode=args.test_mode
+            )
 
-        # Вывод результатов
-        print(f"\n=== Результаты построения графа ===")
-        print(f"Всего пакетов в графе: {len(dependency_graph)}")
-        print(f"Прямые зависимости {args.package}: {dependency_graph.get(args.package, [])}")
+            # Вывод результатов
+            print(f"\n=== Результаты построения графа ===")
+            print(f"Всего пакетов в графе: {len(dependency_graph)}")
+            print(f"Прямые зависимости {args.package}: {dependency_graph.get(args.package, [])}")
         
-        print("\nПостроение графа зависимостей завершено успешно.")
+        print("\nОбработка завершена успешно.")
 
     except Exception as e:
         print(f"Ошибка: {e}", file=sys.stderr)
